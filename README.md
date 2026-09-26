@@ -5,7 +5,7 @@
 ```
 CiscoVPNAuto/
 ├── Mac/        macOS 菜单栏程序（Swift / SwiftUI），可打包为 dmg
-└── Windows/    Windows 版（待开发，见其中 README）
+└── Windows/    Windows 托盘程序（C# / .NET 8 / WinForms），打包为单个 exe，见其中 README
 ```
 
 ## Mac 版
