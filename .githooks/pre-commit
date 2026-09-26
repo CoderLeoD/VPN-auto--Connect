@@ -1,0 +1,15 @@
+#!/bin/sh
+# 提交前检查作者/提交者邮箱
+dir=$(dirname "$0")
+author=$(git var GIT_AUTHOR_IDENT | sed -n 's/.*<\(.*\)>.*/\1/p')
+committer=$(git var GIT_COMMITTER_IDENT | sed -n 's/.*<\(.*\)>.*/\1/p')
+
+if ! sh "$dir/check-email.sh" "$author" "$committer"; then
+    cat >&2 <<MSG
+
+✋ 提交已拒绝：本仓库只允许使用 GitHub 隐藏邮箱（xxx@users.noreply.github.com）。
+   请先运行 ./scripts/setup-git.sh，或手动执行：
+     git config user.email "<你的ID>+<用户名>@users.noreply.github.com"
+MSG
+    exit 1
+fi

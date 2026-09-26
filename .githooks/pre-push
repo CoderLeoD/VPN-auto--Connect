@@ -1,0 +1,31 @@
+#!/bin/sh
+# 推送前检查所有将要推送的提交（防止钩子启用前的旧提交、或 --no-verify 提交混进去）
+dir=$(dirname "$0")
+remote="$1"
+zero=0000000000000000000000000000000000000000
+status=0
+
+while read -r local_ref local_sha remote_ref remote_sha; do
+    case "$local_sha" in *[!0]*) ;; *) continue ;; esac   # 删除分支，跳过
+    case "$remote_sha" in
+        *[!0]*) range="$remote_sha..$local_sha" ;;
+        *)      range="$local_sha --not --remotes=$remote" ;;  # 新分支：只查远程还没有的提交
+    esac
+    # shellcheck disable=SC2086
+    emails=$(git log --format='%ae%n%ce' $range | sort -u)
+    [ -z "$emails" ] && continue
+    # shellcheck disable=SC2086
+    if ! sh "$dir/check-email.sh" $emails; then
+        echo "  ↑ 以上邮箱出现在 $local_ref 将要推送的提交中" >&2
+        status=1
+    fi
+done
+
+if [ $status -ne 0 ]; then
+    cat >&2 <<MSG
+
+✋ 推送已拒绝：本仓库只允许使用 GitHub 隐藏邮箱（xxx@users.noreply.github.com）。
+   用 git log --format='%h %ae %ce' 找到对应提交，改正作者信息后再推送。
+MSG
+fi
+exit $status

@@ -8,6 +8,16 @@ CiscoVPNAuto/
 └── Windows/    Windows 托盘程序（C# / .NET 8 / WinForms），打包为单个 exe，见其中 README
 ```
 
+## clone 后先运行
+
+```bash
+./scripts/setup-git.sh
+```
+
+只为本仓库配置提交身份（GitHub 隐藏邮箱）、SSH 密钥，并启用 `.githooks`：提交和推送前会检查作者/提交者邮箱，
+不是 `xxx@users.noreply.github.com` 的一律拒绝，避免把真实邮箱带到 GitHub。不会修改全局 git 或 `~/.ssh` 配置。
+其他人使用时通过环境变量换成自己的：`GIT_NAME=... GIT_EMAIL=...@users.noreply.github.com SSH_KEY=~/.ssh/xxx ./scripts/setup-git.sh`。
+
 ## Mac 版
 
 ### 打包
