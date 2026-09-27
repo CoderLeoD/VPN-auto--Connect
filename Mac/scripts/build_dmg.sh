@@ -15,7 +15,8 @@ DMG="$DIST/VPNAutoConnect-$VERSION.dmg"
 echo "==> 编译 (release)"
 if [[ "${UNIVERSAL:-0}" == "1" ]]; then
     swift build -c release --arch arm64 --arch x86_64
-    BIN_DIR=".build/apple/Products/Release"
+    # 通用版的输出目录随 SwiftPM 版本变化（.build/apple/... 或 .build/out/...），直接向 SwiftPM 查询
+    BIN_DIR="$(swift build -c release --arch arm64 --arch x86_64 --show-bin-path)"
 else
     swift build -c release
     BIN_DIR="$(swift build -c release --show-bin-path)"
