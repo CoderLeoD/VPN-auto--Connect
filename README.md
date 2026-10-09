@@ -24,9 +24,9 @@ CiscoVPNAuto/
 
 ```bash
 cd Mac
-./scripts/build_dmg.sh                 # 输出 dist/VPNAutoConnect-1.0.0.dmg
+./scripts/build_dmg.sh                 # 输出 dist/VPNAutoConnect-1.1.0.dmg
 UNIVERSAL=1 ./scripts/build_dmg.sh     # Intel + Apple Silicon 通用版
-VERSION=1.1.0 ./scripts/build_dmg.sh   # 指定版本号
+VERSION=1.2.0 ./scripts/build_dmg.sh   # 指定版本号
 swift test                             # 单元测试
 ```
 

@@ -2,11 +2,11 @@
 # 在 macOS / Linux 上交叉编译 Windows 版并打包成 zip（需要 .NET 8 SDK）
 #   ./scripts/build.sh                 # win-x64
 #   ARCH=arm64 ./scripts/build.sh      # win-arm64
-#   VERSION=1.1.0 ./scripts/build.sh   # 指定版本号
+#   VERSION=1.2.0 ./scripts/build.sh   # 指定版本号
 set -euo pipefail
 
 cd "$(dirname "$0")/.."
-VERSION="${VERSION:-1.0.0}"
+VERSION="${VERSION:-1.1.0}"
 RID="win-${ARCH:-x64}"
 DIST="dist"
 OUT="$DIST/$RID"

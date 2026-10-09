@@ -11,7 +11,7 @@
     <LangVersion>latest</LangVersion>
     <AssemblyName>VPNAutoConnect</AssemblyName>
     <Product>VPN AutoConnect</Product>
-    <Version>1.0.0</Version>
+    <Version>1.1.0</Version>
     <ApplicationIcon>Resources\app.ico</ApplicationIcon>
     <ApplicationManifest>app.manifest</ApplicationManifest>
     <ApplicationHighDpiMode>PerMonitorV2</ApplicationHighDpiMode>

@@ -62,6 +62,11 @@ public static class VpnOutput
         return AuthFailureMarks.Any(lower.Contains);
     }
 
+    /// 另一个 Cisco 程序（图形界面，或上次异常退出时留下的 vpncli）占着连接能力。
+    /// 此时 vpncli 不会自己退出，会一直等到超时
+    public static bool IsConnectCapabilityBusy(string output) =>
+        output.Contains("connect capability is unavailable", StringComparison.OrdinalIgnoreCase);
+
     public static string Redact(string s, IEnumerable<string> secrets) =>
         secrets.Where(x => !string.IsNullOrEmpty(x)).Aggregate(s, (acc, x) => acc.Replace(x, "******"));
 

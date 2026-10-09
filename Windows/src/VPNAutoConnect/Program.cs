@@ -16,6 +16,9 @@ static class Program
         TaskScheduler.UnobservedTaskException += (_, e) => e.SetObserved();
         // 让 async/await 的后续代码回到 UI 线程（与 Mac 版的 @MainActor 对应）
         SynchronizationContext.SetSynchronizationContext(new WindowsFormsSynchronizationContext());
+        // 退出时结束还在跑的 vpncli，否则它会变成孤儿继续占着 Cisco 的连接能力
+        Application.ApplicationExit += (_, _) => Shell.KillAll();
+        AppDomain.CurrentDomain.ProcessExit += (_, _) => Shell.KillAll();
         Application.Run(new TrayApp());
     }
 }

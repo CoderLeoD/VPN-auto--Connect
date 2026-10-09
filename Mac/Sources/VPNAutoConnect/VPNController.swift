@@ -62,6 +62,8 @@ final class VPNController: ObservableObject {
     // MARK: - 生命周期
 
     func start() {
+        let version = Bundle.main.object(forInfoDictionaryKey: "CFBundleShortVersionString") as? String ?? "dev"
+        log("程序启动（版本 \(version)）")
         if config.fillUsernameFromCiscoIfEmpty() {
             log("用户名为空，已从 Cisco Secure Client 的记录中自动填入")
         }
@@ -188,41 +190,18 @@ final class VPNController: ObservableObject {
         defer { busy = false }
 
         if config.quitCiscoGUI { await quitCiscoGUI() }
+        // 上一次程序异常退出时留下的 vpn 进程会一直占着 Cisco 的连接能力，先清掉
+        await cleanUpStrayCLI(cli)
 
-        // 验证码快过期时等下一个周期，避免提交时刚好失效；同一个码不重复使用
-        var now = Date()
-        var counter = UInt64(now.timeIntervalSince1970) / UInt64(totp.period)
-        if TOTP.secondsRemaining(period: totp.period, at: now) < 8 || counter == lastUsedTOTPCounter {
-            let wait = TOTP.secondsRemaining(period: totp.period, at: now) + 1
-            lastMessage = "等待新的验证码（\(wait) 秒）…"
-            log(lastMessage)
-            try? await Task.sleep(nanoseconds: UInt64(wait) * 1_000_000_000)
-            now = Date()
-            counter = UInt64(now.timeIntervalSince1970) / UInt64(totp.period)
+        guard var (res, output) = await attemptConnect(cli: cli, password: password, totp: totp) else { return }
+        if state != .connected, Self.isConnectCapabilityBusy(output) {
+            log("Cisco 的连接能力被其他程序占用，清理后重试一次")
+            if config.quitCiscoGUI { await quitCiscoGUI() }
+            await cleanUpStrayCLI(cli)
+            guard let again = await attemptConnect(cli: cli, password: password, totp: totp) else { return }
+            (res, output) = again
         }
-        guard let code = TOTP.code(for: totp, at: now) else {
-            lastMessage = "验证码密钥无效，请重新配置"
-            return
-        }
-        lastUsedTOTPCounter = counter
 
-        // 与 Cisco GUI 的登录顺序一致：[组] → 用户名 → 密码 → Second Password(验证码) → 接受 banner
-        var lines = ["connect \(config.server.trimmingCharacters(in: .whitespaces))"]
-        if !config.group.trimmingCharacters(in: .whitespaces).isEmpty { lines.append(config.group) }
-        lines.append(config.username.trimmingCharacters(in: .whitespaces))
-        lines.append(password)
-        lines.append(code)
-        if config.acceptBanner { lines.append("y") }
-        lines.append("exit")
-        let input = lines.joined(separator: "\n") + "\n"
-
-        lastMessage = "正在连接 \(config.server)…"
-        log(lastMessage)
-        let result = await Shell.run(cli, args: ["-s"], input: input, timeout: 90)
-        let output = Self.redact(result.output, secrets: [password, code])
-        log("vpn 输出：\n" + Self.tail(output, lines: 25))
-
-        await refreshState()
         if state == .connected {
             consecutiveFailures = 0
             authFailures = 0
@@ -245,7 +224,11 @@ final class VPNController: ObservableObject {
                 pauseReason = "连续认证失败，已暂停自动重连。请检查密码/验证码是否已在 Cisco 中更换。"
                 notify(title: "VPN 自动连接已暂停", body: pauseReason)
             }
-        } else if result.timedOut {
+        } else if Self.isConnectCapabilityBusy(output) {
+            lastMessage = config.quitCiscoGUI
+                ? "连接失败：Cisco 的连接能力被其他程序占用（已尝试清理）"
+                : "连接失败：Cisco 的连接能力被其他程序占用，可在设置中开启「连接前退出 Cisco 界面」"
+        } else if res.timedOut {
             lastMessage = "连接超时"
         } else {
             lastMessage = "连接失败：" + (Self.lastMeaningfulLine(output) ?? "未知原因")
@@ -257,6 +240,81 @@ final class VPNController: ObservableObject {
         if !manual, consecutiveFailures == 3 {
             notify(title: "VPN 自动重连失败", body: lastMessage)
         }
+    }
+
+    /// 取验证码并跑一次 `vpn -s`。返回 nil 表示验证码不可用（已写 lastMessage）
+    private func attemptConnect(cli: String, password: String, totp: TOTPConfig) async -> (Shell.Result, String)? {
+        // 验证码快过期时等下一个周期，避免提交时刚好失效；同一个码不重复使用
+        var now = Date()
+        var counter = UInt64(now.timeIntervalSince1970) / UInt64(totp.period)
+        if TOTP.secondsRemaining(period: totp.period, at: now) < 8 || counter == lastUsedTOTPCounter {
+            let wait = TOTP.secondsRemaining(period: totp.period, at: now) + 1
+            lastMessage = "等待新的验证码（\(wait) 秒）…"
+            log(lastMessage)
+            try? await Task.sleep(nanoseconds: UInt64(wait) * 1_000_000_000)
+            now = Date()
+            counter = UInt64(now.timeIntervalSince1970) / UInt64(totp.period)
+        }
+        guard let code = TOTP.code(for: totp, at: now) else {
+            lastMessage = "验证码密钥无效，请重新配置"
+            return nil
+        }
+        lastUsedTOTPCounter = counter
+
+        // 与 Cisco GUI 的登录顺序一致：[组] → 用户名 → 密码 → Second Password(验证码) → 接受 banner
+        var lines = ["connect \(config.server.trimmingCharacters(in: .whitespaces))"]
+        if !config.group.trimmingCharacters(in: .whitespaces).isEmpty { lines.append(config.group) }
+        lines.append(config.username.trimmingCharacters(in: .whitespaces))
+        lines.append(password)
+        lines.append(code)
+        if config.acceptBanner { lines.append("y") }
+        lines.append("exit")
+        let input = lines.joined(separator: "\n") + "\n"
+
+        lastMessage = "正在连接 \(config.server)…"
+        log(lastMessage)
+        // 连接能力被占用时 vpn 不会自己退出，会一直等到超时，看到这句就提前结束
+        let result = await Shell.run(cli, args: ["-s"], input: input, timeout: 90,
+                                     stopWhen: Self.isConnectCapabilityBusy)
+        let output = Self.redact(result.output, secrets: [password, code])
+        log("vpn 输出：\n" + Self.tail(output, lines: 25))
+        await refreshState()
+        return (result, output)
+    }
+
+    /// 结束当前用户名下、不是本程序正在等待的 Cisco 命令行进程
+    private func cleanUpStrayCLI(_ cli: String) async {
+        let ps = await Shell.run("/bin/ps", args: ["-x", "-o", "pid=,command="], input: nil, timeout: 10)
+        let pids = Self.strayCLIPids(psOutput: ps.output, cliPaths: Self.cliCandidates,
+                                     excluding: Shell.runningPids().union([getpid()]))
+        guard !pids.isEmpty else { return }
+        log("清理残留的 Cisco 命令行进程：\(pids.map(String.init).joined(separator: ", "))")
+        pids.forEach { kill($0, SIGTERM) }
+        for _ in 0..<10 {
+            if pids.allSatisfy({ kill($0, 0) != 0 }) { break }
+            try? await Task.sleep(nanoseconds: 300_000_000)
+        }
+        let left = pids.filter { kill($0, 0) == 0 }
+        if !left.isEmpty {
+            left.forEach { kill($0, SIGKILL) }
+            log("强制结束未响应的进程：\(left.map(String.init).joined(separator: ", "))")
+        }
+        try? await Task.sleep(nanoseconds: 500_000_000)
+    }
+
+    /// 从 `ps -o pid=,command=` 的输出中挑出 Cisco 命令行进程
+    nonisolated static func strayCLIPids(psOutput: String, cliPaths: [String], excluding: Set<Int32>) -> [Int32] {
+        psOutput.components(separatedBy: .newlines).compactMap { line in
+            let t = line.trimmingCharacters(in: .whitespaces)
+            guard let sp = t.firstIndex(of: " "), let pid = Int32(t[..<sp]) else { return nil }
+            let cmd = t[sp...].trimmingCharacters(in: .whitespaces)
+            let isCLI = cliPaths.contains { cmd == $0 || cmd.hasPrefix($0 + " ") }
+            return isCLI && !excluding.contains(pid) ? pid : nil
+        }
+    }
+
+    nonisolated static func isConnectCapabilityBusy(_ output: String) -> Bool {
+        output.lowercased().contains("connect capability is unavailable")
     }
 
     func disconnect() async {
@@ -368,7 +426,24 @@ final class VPNController: ObservableObject {
 enum Shell {
     struct Result { let output: String; let status: Int32; let timedOut: Bool }
 
-    static func run(_ path: String, args: [String], input: String?, timeout: TimeInterval) async -> Result {
+    /// 本程序启动、尚未结束的子进程。退出时据此收尾，清理残留时据此排除自己的进程
+    private static let lock = NSLock()
+    nonisolated(unsafe) private static var running: [Int32: Process] = [:]
+
+    static func runningPids() -> Set<Int32> {
+        lock.lock(); defer { lock.unlock() }
+        return Set(running.keys)
+    }
+
+    /// 程序退出前调用：结束所有还在跑的子进程，避免它们变成孤儿继续占着 Cisco 的连接能力
+    static func terminateAll() {
+        lock.lock(); let procs = Array(running.values); lock.unlock()
+        procs.filter(\.isRunning).forEach { $0.terminate() }
+    }
+
+    /// - Parameter stopWhen: 每收到一段输出就用已收集的全部输出调用一次，返回 true 时提前结束进程
+    static func run(_ path: String, args: [String], input: String?, timeout: TimeInterval,
+                    stopWhen: (@Sendable (String) -> Bool)? = nil) async -> Result {
         await withCheckedContinuation { cont in
             DispatchQueue.global(qos: .userInitiated).async {
                 let p = Process()
@@ -380,10 +455,16 @@ enum Shell {
                 p.standardInput = inPipe
 
                 var data = Data()
-                let lock = NSLock()
+                var stopped = false
+                let dataLock = NSLock()
                 outPipe.fileHandleForReading.readabilityHandler = { h in
                     let d = h.availableData
-                    lock.lock(); data.append(d); lock.unlock()
+                    dataLock.lock()
+                    data.append(d)
+                    let shouldStop = !stopped && stopWhen?(String(decoding: data, as: UTF8.self)) == true
+                    if shouldStop { stopped = true }
+                    dataLock.unlock()
+                    if shouldStop, p.isRunning { p.terminate() }
                 }
                 let done = DispatchSemaphore(value: 0)
                 p.terminationHandler = { _ in done.signal() }
@@ -394,6 +475,8 @@ enum Shell {
                     cont.resume(returning: Result(output: "无法启动 \(path): \(error)", status: -1, timedOut: false))
                     return
                 }
+                let pid = p.processIdentifier
+                lock.lock(); running[pid] = p; lock.unlock()
                 if let input {
                     inPipe.fileHandleForWriting.write(Data(input.utf8))
                 }
@@ -403,14 +486,18 @@ enum Shell {
                 if done.wait(timeout: .now() + timeout) == .timedOut {
                     timedOut = true
                     p.terminate()
-                    _ = done.wait(timeout: .now() + 3)
+                    if done.wait(timeout: .now() + 3) == .timedOut {
+                        kill(pid, SIGKILL)
+                        _ = done.wait(timeout: .now() + 2)
+                    }
                 }
+                lock.lock(); running[pid] = nil; lock.unlock()
                 outPipe.fileHandleForReading.readabilityHandler = nil
                 let rest = (try? outPipe.fileHandleForReading.readToEnd()) ?? nil
-                lock.lock()
+                dataLock.lock()
                 if let rest { data.append(rest) }
                 let text = String(decoding: data, as: UTF8.self)
-                lock.unlock()
+                dataLock.unlock()
                 cont.resume(returning: Result(output: text, status: p.isRunning ? -1 : p.terminationStatus, timedOut: timedOut))
             }
         }

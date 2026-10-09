@@ -17,15 +17,15 @@ Windows/
 
 ```powershell
 # Windows
-.\scripts\build.ps1                     # 输出 dist\VPNAutoConnect-1.0.0-win-x64.zip
+.\scripts\build.ps1                     # 输出 dist\VPNAutoConnect-1.1.0-win-x64.zip
 .\scripts\build.ps1 -Arch arm64         # ARM 版 Windows
-.\scripts\build.ps1 -Version 1.1.0      # 指定版本号
+.\scripts\build.ps1 -Version 1.2.0      # 指定版本号
 ```
 
 ```bash
 # macOS / Linux 交叉编译
 ./scripts/build.sh
-ARCH=arm64 VERSION=1.1.0 ./scripts/build.sh
+ARCH=arm64 VERSION=1.2.0 ./scripts/build.sh
 dotnet test tests/VPNAutoConnect.Tests  # 单元测试
 ```
 

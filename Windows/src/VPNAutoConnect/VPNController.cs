@@ -57,6 +57,7 @@ sealed class VPNController
     public void Start()
     {
         ui = SynchronizationContext.Current;
+        Log($"程序启动（版本 {Application.ProductVersion.Split('+')[0]}）");
         if (config.FillUsernameFromCiscoIfEmpty())
             Log("用户名为空，已从 Cisco Secure Client 的记录中自动填入");
 
@@ -176,43 +177,20 @@ sealed class VPNController
         try
         {
             if (config.QuitCiscoGUI) await QuitCiscoGUI();
+            // 上一次程序异常退出时留下的 vpncli 会一直占着 Cisco 的连接能力，先清掉
+            await CleanUpStrayCli();
 
-            // 验证码快过期时等下一个周期，避免提交时刚好失效；同一个码不重复使用
-            var now = DateTimeOffset.UtcNow;
-            var counter = TOTP.Counter(totp.Period, now);
-            if (TOTP.SecondsRemaining(totp.Period, now) < 8 || counter == lastUsedTOTPCounter)
+            if (await AttemptConnect(cli, password, totp) is not { } first) return;
+            var (result, output) = first;
+            if (State != VPNState.Connected && VpnOutput.IsConnectCapabilityBusy(output))
             {
-                var wait = TOTP.SecondsRemaining(totp.Period, now) + 1;
-                LastMessage = $"等待新的验证码（{wait} 秒）…";
-                Log(LastMessage);
-                await Task.Delay(wait * 1000);
-                now = DateTimeOffset.UtcNow;
-                counter = TOTP.Counter(totp.Period, now);
+                Log("Cisco 的连接能力被其他程序占用，清理后重试一次");
+                if (config.QuitCiscoGUI) await QuitCiscoGUI();
+                await CleanUpStrayCli();
+                if (await AttemptConnect(cli, password, totp) is not { } again) return;
+                (result, output) = again;
             }
-            if (TOTP.Code(totp, now) is not { } code)
-            {
-                LastMessage = "验证码密钥无效，请重新配置";
-                return;
-            }
-            lastUsedTOTPCounter = counter;
 
-            // 与 Cisco GUI 的登录顺序一致：[组] → 用户名 → 密码 → Second Password(验证码) → 接受 banner
-            var lines = new List<string> { $"connect {config.Server.Trim()}" };
-            if (config.Group.Trim().Length > 0) lines.Add(config.Group.Trim());
-            lines.Add(config.Username.Trim());
-            lines.Add(password);
-            lines.Add(code);
-            if (config.AcceptBanner) lines.Add("y");
-            lines.Add("exit");
-            var input = string.Join("\r\n", lines) + "\r\n";
-
-            LastMessage = $"正在连接 {config.Server}…";
-            Log(LastMessage);
-            var result = await Shell.Run(cli, "-s", input, TimeSpan.FromSeconds(90));
-            var output = VpnOutput.Redact(result.Output, [password, code]);
-            Log("vpncli 输出：\n" + VpnOutput.Tail(output, 25));
-
-            await RefreshState();
             if (State == VPNState.Connected)
             {
                 consecutiveFailures = 0;
@@ -236,6 +214,12 @@ sealed class VPNController
                     Notify?.Invoke("VPN 自动连接已暂停", PauseReason);
                 }
             }
+            else if (VpnOutput.IsConnectCapabilityBusy(output))
+            {
+                LastMessage = config.QuitCiscoGUI
+                    ? "连接失败：Cisco 的连接能力被其他程序占用（已尝试清理）"
+                    : "连接失败：Cisco 的连接能力被其他程序占用，可在设置中开启「连接前退出 Cisco 界面」";
+            }
             else if (result.TimedOut)
             {
                 LastMessage = "连接超时";
@@ -255,6 +239,78 @@ sealed class VPNController
         {
             Busy = false;
             Changed?.Invoke();
+        }
+    }
+
+    /// 取验证码并跑一次 vpncli -s。返回 null 表示验证码不可用（已写 LastMessage）
+    async Task<(Shell.Result Result, string Output)?> AttemptConnect(string cli, string password, TOTPConfig totp)
+    {
+        // 验证码快过期时等下一个周期，避免提交时刚好失效；同一个码不重复使用
+        var now = DateTimeOffset.UtcNow;
+        var counter = TOTP.Counter(totp.Period, now);
+        if (TOTP.SecondsRemaining(totp.Period, now) < 8 || counter == lastUsedTOTPCounter)
+        {
+            var wait = TOTP.SecondsRemaining(totp.Period, now) + 1;
+            LastMessage = $"等待新的验证码（{wait} 秒）…";
+            Log(LastMessage);
+            await Task.Delay(wait * 1000);
+            now = DateTimeOffset.UtcNow;
+            counter = TOTP.Counter(totp.Period, now);
+        }
+        if (TOTP.Code(totp, now) is not { } code)
+        {
+            LastMessage = "验证码密钥无效，请重新配置";
+            return null;
+        }
+        lastUsedTOTPCounter = counter;
+
+        // 与 Cisco GUI 的登录顺序一致：[组] → 用户名 → 密码 → Second Password(验证码) → 接受 banner
+        var lines = new List<string> { $"connect {config.Server.Trim()}" };
+        if (config.Group.Trim().Length > 0) lines.Add(config.Group.Trim());
+        lines.Add(config.Username.Trim());
+        lines.Add(password);
+        lines.Add(code);
+        if (config.AcceptBanner) lines.Add("y");
+        lines.Add("exit");
+        var input = string.Join("\r\n", lines) + "\r\n";
+
+        LastMessage = $"正在连接 {config.Server}…";
+        Log(LastMessage);
+        // 连接能力被占用时 vpncli 不会自己退出，看到这句就提前结束，不白等 90 秒
+        var result = await Shell.Run(cli, "-s", input, TimeSpan.FromSeconds(90), VpnOutput.IsConnectCapabilityBusy);
+        var output = VpnOutput.Redact(result.Output, [password, code]);
+        Log("vpncli 输出：\n" + VpnOutput.Tail(output, 25));
+        await RefreshState();
+        return (result, output);
+    }
+
+    /// 结束当前会话里、不是本程序正在等待的 vpncli 进程
+    async Task CleanUpStrayCli()
+    {
+        int session;
+        using (var self = Process.GetCurrentProcess()) session = self.SessionId;
+        var mine = Shell.RunningPids();
+        var all = Process.GetProcessesByName("vpncli");
+        try
+        {
+            var strays = all.Where(p =>
+            {
+                try { return p.SessionId == session && !mine.Contains(p.Id); } catch { return false; }
+            }).ToList();
+            if (strays.Count == 0) return;
+            Log("清理残留的 Cisco 命令行进程：" + string.Join(", ", strays.Select(p => p.Id)));
+            foreach (var p in strays)
+            {
+                try { p.Kill(entireProcessTree: true); }
+                catch (Exception e) { Log($"无法结束 vpncli（{p.Id}）：{e.Message}"); }
+            }
+            for (int i = 0; i < 10 && strays.Any(p => !HasExited(p)); i++)
+                await Task.Delay(300);
+            await Task.Delay(500);
+        }
+        finally
+        {
+            foreach (var p in all) p.Dispose();
         }
     }
 
@@ -364,7 +420,23 @@ static class Shell
 {
     public record Result(string Output, int ExitCode, bool TimedOut);
 
-    public static async Task<Result> Run(string path, string args, string? input, TimeSpan timeout)
+    /// 本程序启动、尚未结束的子进程。退出时据此收尾，清理残留时据此排除自己的进程
+    static readonly System.Collections.Concurrent.ConcurrentDictionary<int, Process> Running = new();
+
+    public static HashSet<int> RunningPids() => [.. Running.Keys];
+
+    /// 程序退出前调用：结束所有还在跑的子进程，避免它们变成孤儿继续占着 Cisco 的连接能力
+    public static void KillAll()
+    {
+        foreach (var p in Running.Values)
+        {
+            try { if (!p.HasExited) p.Kill(entireProcessTree: true); } catch { }
+        }
+    }
+
+    /// <param name="stopWhen">每收到一行输出就用已收集的全部输出调用一次，返回 true 时提前结束进程</param>
+    public static async Task<Result> Run(string path, string args, string? input, TimeSpan timeout,
+        Func<string, bool>? stopWhen = null)
     {
         var psi = new ProcessStartInfo(path, args)
         {
@@ -380,6 +452,25 @@ static class Shell
             WorkingDirectory = Path.GetDirectoryName(path) ?? "",
         };
         using var p = new Process { StartInfo = psi };
+        var buffer = new StringBuilder();
+        var gate = new object();
+        using var stopCts = new CancellationTokenSource();
+        void OnData(object? _, DataReceivedEventArgs e)
+        {
+            if (e.Data == null) return;
+            bool stop;
+            lock (gate)
+            {
+                buffer.Append(e.Data).Append('\n');
+                stop = stopWhen?.Invoke(buffer.ToString()) == true;
+            }
+            if (stop)
+            {
+                try { stopCts.Cancel(); } catch (ObjectDisposedException) { }
+            }
+        }
+        p.OutputDataReceived += OnData;
+        p.ErrorDataReceived += OnData;
         try
         {
             p.Start();
@@ -388,34 +479,41 @@ static class Shell
         {
             return new Result($"无法启动 {path}: {e.Message}", -1, false);
         }
-
-        var stdout = p.StandardOutput.ReadToEndAsync();
-        var stderr = p.StandardError.ReadToEndAsync();
+        var pid = p.Id;
+        Running[pid] = p;
         try
         {
-            if (input != null) await p.StandardInput.WriteAsync(input);
-            p.StandardInput.Close();
-        }
-        catch { /* 进程提前退出时写入会失败，忽略 */ }
-
-        var timedOut = false;
-        using (var cts = new CancellationTokenSource(timeout))
-        {
+            p.BeginOutputReadLine();
+            p.BeginErrorReadLine();
             try
             {
-                await p.WaitForExitAsync(cts.Token);
+                if (input != null) await p.StandardInput.WriteAsync(input);
+                p.StandardInput.Close();
+            }
+            catch { /* 进程提前退出时写入会失败，忽略 */ }
+
+            var timedOut = false;
+            using var timeoutCts = new CancellationTokenSource(timeout);
+            using var linked = CancellationTokenSource.CreateLinkedTokenSource(timeoutCts.Token, stopCts.Token);
+            try
+            {
+                // 进程退出且输出读完才返回
+                await p.WaitForExitAsync(linked.Token);
             }
             catch (OperationCanceledException)
             {
-                timedOut = true;
+                timedOut = !stopCts.IsCancellationRequested;
                 try { p.Kill(entireProcessTree: true); } catch { }
+                // 被结束的进程也要把已输出的内容收回来
+                await Task.WhenAny(p.WaitForExitAsync(), Task.Delay(3000));
             }
+            string text;
+            lock (gate) text = buffer.ToString();
+            return new Result(text, p.HasExited ? p.ExitCode : -1, timedOut);
         }
-        // 被结束的进程也要把已输出的内容收回来
-        var done = Task.WhenAll(stdout, stderr);
-        await Task.WhenAny(done, Task.Delay(3000));
-        var text = (stdout.IsCompletedSuccessfully ? stdout.Result : "")
-            + (stderr.IsCompletedSuccessfully ? stderr.Result : "");
-        return new Result(text, p.HasExited ? p.ExitCode : -1, timedOut);
+        finally
+        {
+            Running.TryRemove(pid, out _);
+        }
     }
 }

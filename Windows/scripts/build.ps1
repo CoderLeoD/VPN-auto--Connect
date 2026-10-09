@@ -1,9 +1,9 @@
 # 在 Windows 上编译并打包成 zip（需要 .NET 8 SDK）
 #   .\scripts\build.ps1                    # win-x64
 #   .\scripts\build.ps1 -Arch arm64        # win-arm64
-#   .\scripts\build.ps1 -Version 1.1.0     # 指定版本号
+#   .\scripts\build.ps1 -Version 1.2.0     # 指定版本号
 param(
-    [string]$Version = "1.0.0",
+    [string]$Version = "1.1.0",
     [string]$Arch = "x64"
 )
 $ErrorActionPreference = "Stop"
